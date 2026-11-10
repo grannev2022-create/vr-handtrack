@@ -11,6 +11,8 @@ jobs:
           distribution: 'temurin'
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses || true
       - name: Grant execute permission
         run: chmod +x gradlew || true
       - name: Build Debug APK
