@@ -9,7 +9,6 @@ import android.os.SystemClock;
 import android.util.Log;
 import android.util.Size;
 import android.view.WindowManager;
-import android.widget.FrameLayout;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
@@ -26,7 +25,6 @@ import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.google.ar.core.ArCoreApk;
 import com.google.common.util.concurrent.ListenableFuture;
-import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -37,7 +35,6 @@ public class VRActivity extends AppCompatActivity {
 
     private GLSurfaceView glView;
     private VrRenderer renderer;
-    private HandOverlayView overlayView;
     private SettingsStore settings;
     private FlashlightController flashlight;
     private HandTracker handTracker;
@@ -68,19 +65,12 @@ public class VRActivity extends AppCompatActivity {
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-        FrameLayout root = new FrameLayout(this);
-
         glView = new GLSurfaceView(this);
         glView.setEGLContextClientVersion(2);
         renderer = new VrRenderer();
         glView.setRenderer(renderer);
         glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
-        root.addView(glView, new FrameLayout.LayoutParams(-1, -1));
-
-        overlayView = new HandOverlayView(this);
-        root.addView(overlayView, new FrameLayout.LayoutParams(-1, -1));
-
-        setContentView(root);
+        setContentView(glView);
 
         WindowInsetsControllerCompat insets = WindowCompat.getInsetsController(getWindow(), glView);
         insets.hide(WindowInsetsCompat.Type.systemBars());
@@ -92,17 +82,8 @@ public class VRActivity extends AppCompatActivity {
         try {
             handTracker = new HandTracker(this, new HandTracker.Listener() {
                 @Override
-                public void onPinchStart() {
+                public void onOkGesture() {
                     toggleFlashlight();
-                }
-
-                @Override
-                public void onPinchEnd() {
-                }
-
-                @Override
-                public void onHandResult(HandLandmarkerResult result, int width, int height) {
-                    overlayView.onHands(result, width, height);
                 }
             });
         } catch (Exception e) {
@@ -214,7 +195,7 @@ public class VRActivity extends AppCompatActivity {
                         .build();
                 analysis.setAnalyzer(cameraExecutor, image -> {
                     try {
-                        if (!handTracker.isBusy()) handTracker.submit(image.toBitmap());
+                        if (handTracker.canAccept()) handTracker.submit(image.toBitmap());
                     } finally {
                         image.close();
                     }

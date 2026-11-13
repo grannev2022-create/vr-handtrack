@@ -131,7 +131,7 @@ public class ArCorePose implements PoseProvider {
     }
 
     private void feedHandTracker(Frame frame) {
-        if (handTracker == null || handTracker.isBusy()) return;
+        if (handTracker == null || handTracker.canAccept()) return;
         long now = System.nanoTime();
         if (now - lastHandFrameNs < 66_000_000L) return;
         if (!converting.compareAndSet(false, true)) return;
