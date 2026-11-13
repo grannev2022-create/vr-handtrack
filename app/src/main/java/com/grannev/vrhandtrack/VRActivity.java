@@ -12,6 +12,8 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.hardware.camera2.CameraAccessException;
+import android.hardware.camera2.CameraManager;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
@@ -57,6 +59,16 @@ public class VRActivity extends AppCompatActivity implements SensorEventListener
     private Sensor gyro;
     private float[] gyroData = new float[3];
 
+    private CameraManager cameraManager;
+    private String cameraId;
+    private boolean isFlashOn = false;
+
+    private final float[][] smoothed = new float[21][3];
+    private boolean hasSmooth = false;
+    private static final float EMA_ALPHA = 0.6f;
+    private boolean pinchActive = false;
+    private static final float PINCH_IN = 0.25f, PINCH_OUT = 0.35f;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -78,6 +90,15 @@ public class VRActivity extends AppCompatActivity implements SensorEventListener
             gyro = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
         }
 
+        cameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
+        try {
+            if (cameraManager != null) {
+                cameraId = cameraManager.getCameraIdList()[0];
+            }
+        } catch (CameraAccessException e) {
+            Log.e(TAG, "CameraManager error: " + e.getMessage());
+        }
+
         setupHandLandmarker();
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
@@ -96,12 +117,12 @@ public class VRActivity extends AppCompatActivity implements SensorEventListener
             HandLandmarker.HandLandmarkerOptions options =
                     HandLandmarker.HandLandmarkerOptions.builder()
                             .setBaseOptions(baseOptions)
-                            .setNumHands(2)
+                            .setNumHands(1)
                             .setMinHandDetectionConfidence(0.5f)
                             .setMinTrackingConfidence(0.5f)
                             .setRunningMode(RunningMode.LIVE_STREAM)
                             .setResultListener((result, inputImage) -> {
-                                runOnUiThread(() -> overlayView.setResults(result));
+                                runOnUiThread(() -> processResults(result));
                             })
                             .build();
 
@@ -109,6 +130,51 @@ public class VRActivity extends AppCompatActivity implements SensorEventListener
         } catch (Exception e) {
             Log.e(TAG, "Ошибка запуска MediaPipe: " + e.getMessage());
             Toast.makeText(this, "Не найден файл hand_landmarker.task в assets", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void processResults(HandLandmarkerResult result) {
+        if (result.landmarks().isEmpty()) {
+            hasSmooth = false;
+            pinchActive = false;
+            overlayView.setResults(null, false);
+            return;
+        }
+
+        List<NormalizedLandmark> lm = result.landmarks().get(0);
+        if (!hasSmooth) {
+            for (int i = 0; i < 21; i++) { smoothed[i][0] = lm.get(i).x(); smoothed[i][1] = lm.get(i).y(); }
+            hasSmooth = true;
+        } else {
+            for (int i = 0; i < 21; i++) {
+                smoothed[i][0] = EMA_ALPHA * lm.get(i).x() + (1 - EMA_ALPHA) * smoothed[i][0];
+                smoothed[i][1] = EMA_ALPHA * lm.get(i).y() + (1 - EMA_ALPHA) * smoothed[i][1];
+            }
+        }
+
+        float dx = smoothed[4][0] - smoothed[8][0], dy = smoothed[4][1] - smoothed[8][1];
+        float dist = (float) Math.sqrt(dx * dx + dy * dy);
+        float px = smoothed[0][0] - smoothed[9][0], py = smoothed[0][1] - smoothed[9][1];
+        float palm = (float) Math.sqrt(px * px + py * py);
+        float norm = palm > 0.001f ? dist / palm : dist;
+
+        if (!pinchActive && norm < PINCH_IN) {
+            pinchActive = true;
+            toggleFlashlight();
+        } else if (pinchActive && norm > PINCH_OUT) {
+            pinchActive = false;
+        }
+
+        overlayView.setResults(smoothed, pinchActive);
+    }
+
+    private void toggleFlashlight() {
+        if (cameraManager == null || cameraId == null) return;
+        try {
+            isFlashOn = !isFlashOn;
+            cameraManager.setTorchMode(cameraId, isFlashOn);
+        } catch (CameraAccessException e) {
+            Log.e(TAG, "Flashlight error: " + e.getMessage());
         }
     }
 
@@ -145,15 +211,12 @@ public class VRActivity extends AppCompatActivity implements SensorEventListener
             image.close();
             return;
         }
-
         try {
             Bitmap rawBitmap = image.toBitmap();
             Matrix matrix = new Matrix();
             matrix.postRotate(image.getImageInfo().getRotationDegrees());
-
             Bitmap rotatedBitmap = Bitmap.createBitmap(
                     rawBitmap, 0, 0, rawBitmap.getWidth(), rawBitmap.getHeight(), matrix, true);
-
             MPImage mpImage = new BitmapImageBuilder(rotatedBitmap).build();
             handLandmarker.detectAsync(mpImage, SystemClock.uptimeMillis());
         } catch (Exception e) {
@@ -168,8 +231,6 @@ public class VRActivity extends AppCompatActivity implements SensorEventListener
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == CAMERA_PERMISSION_CODE && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             startCamera();
-        } else {
-            Toast.makeText(this, "Нужно разрешение на камеру", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -210,12 +271,12 @@ public class VRActivity extends AppCompatActivity implements SensorEventListener
     }
 
     private static class OverlayView extends View {
-        private HandLandmarkerResult results;
+        private float[][] points;
+        private boolean pinch;
         private float[] gyroVals = new float[3];
         private final Paint pointPaint;
         private final Paint linePaint;
         private final Paint dividerPaint;
-        private final Paint textPaint;
 
         private static final int[][] HAND_CONNECTIONS = {
                 {0, 1}, {1, 2}, {2, 3}, {3, 4},
@@ -239,15 +300,11 @@ public class VRActivity extends AppCompatActivity implements SensorEventListener
             dividerPaint = new Paint();
             dividerPaint.setColor(Color.BLACK);
             dividerPaint.setStrokeWidth(12f);
-
-            textPaint = new Paint();
-            textPaint.setColor(Color.WHITE);
-            textPaint.setTextSize(36f);
-            textPaint.setAntiAlias(true);
         }
 
-        public void setResults(HandLandmarkerResult handLandmarkerResult) {
-            this.results = handLandmarkerResult;
+        public void setResults(float[][] pts, boolean p) {
+            this.points = pts;
+            this.pinch = p;
             invalidate();
         }
 
@@ -259,41 +316,39 @@ public class VRActivity extends AppCompatActivity implements SensorEventListener
         @Override
         protected void onDraw(@NonNull Canvas canvas) {
             super.onDraw(canvas);
-            
             int width = getWidth();
             int height = getHeight();
             int halfW = width / 2;
 
-            // Рисуем разделительную линию по центру
+            // Разделительная линия для стерео
             canvas.drawLine(halfW, 0, halfW, height, dividerPaint);
 
-            // Левый глаз
-            drawEye(canvas, 0, 0, halfW, height);
-            // Правый глаз
-            drawEye(canvas, halfW, 0, halfW, height);
+            // Сдвиг картинки от гироскопа (XR-эффект)
+            float offsetX = gyroVals[1] * 20f; // наклон влево/вправо
+            float offsetY = gyroVals[0] * 20f; // наклон вверх/вниз
 
-            // Текст гироскопа по центру
-            if (gyroVals != null) {
-                canvas.drawText(String.format("G: %.1f, %.1f, %.1f", gyroVals[0], gyroVals[1], gyroVals[2]), 20, 40, textPaint);
-            }
+            // Рисуем левый и правый глаз
+            drawEye(canvas, 0, 0, halfW, height, offsetX, offsetY);
+            drawEye(canvas, halfW, 0, halfW, height, offsetX, offsetY);
         }
 
-        private void drawEye(Canvas canvas, float ox, float oy, int vw, int vh) {
-            if (results == null || results.landmarks().isEmpty()) return;
+        private void drawEye(Canvas canvas, float ox, float oy, int vw, int vh, float offsetX, float offsetY) {
+            if (points == null) return;
 
-            for (List<NormalizedLandmark> handLandmarks : results.landmarks()) {
-                for (int[] connection : HAND_CONNECTIONS) {
-                    NormalizedLandmark start = handLandmarks.get(connection[0]);
-                    NormalizedLandmark end = handLandmarks.get(connection[1]);
-                    canvas.drawLine(
-                            ox + start.x() * vw, oy + start.y() * vh,
-                            ox + end.x() * vw, oy + end.y() * vh,
-                            linePaint
-                    );
-                }
+            for (int[] connection : HAND_CONNECTIONS) {
+                float x1 = ox + points[connection[0]][0] * vw + offsetX;
+                float y1 = oy + points[connection[0]][1] * vh + offsetY;
+                float x2 = ox + points[connection[1]][0] * vw + offsetX;
+                float y2 = oy + points[connection[1]][1] * vh + offsetY;
+                canvas.drawLine(x1, y1, x2, y2, linePaint);
+            }
 
-                for (NormalizedLandmark landmark : handLandmarks) {
-                    canvas.drawCircle(ox + landmark.x() * vw, oy + landmark.y() * vh, 10f, pointPaint);
+            for (int i = 0; i < 21; i++) {
+                float radius = (i == 4 || i == 8) ? 12f : 6f;
+                if (pinch && (i == 4 || i == 8)) {
+                    canvas.drawCircle(ox + points[i][0] * vw + offsetX, oy + points[i][1] * vh + offsetY, radius * 2, pointPaint);
+                } else {
+                    canvas.drawCircle(ox + points[i][0] * vw + offsetX, oy + points[i][1] * vh + offsetY, radius, pointPaint);
                 }
             }
         }
