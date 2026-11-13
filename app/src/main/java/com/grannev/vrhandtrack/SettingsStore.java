@@ -24,4 +24,7 @@ public final class SettingsStore {
     public void setSmoothing(int percent) {
         prefs.edit().putInt("smoothing", Math.max(0, Math.min(100, percent))).apply();
     }
+
+    public boolean isXrCamera() { return prefs.getBoolean("xr_camera", true); }
+    public void setXrCamera(boolean value) { prefs.edit().putBoolean("xr_camera", value).apply(); }
 }

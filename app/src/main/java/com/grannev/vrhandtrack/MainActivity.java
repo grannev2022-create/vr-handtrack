@@ -7,11 +7,9 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
-
 import androidx.appcompat.app.AppCompatActivity;
 
-public class MenuActivity extends AppCompatActivity {
-
+public class MainActivity extends AppCompatActivity {
     private TextView summary;
     private SettingsStore settings;
 
@@ -52,19 +50,14 @@ public class MenuActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         String mode = settings.getMode() == SettingsStore.MODE_6DOF ? "6DoF" : "3DoF";
-        summary.setText("FPS: " + settings.getFps()
-                + "  •  Режим: " + mode
-                + "  •  Плавность: " + settings.getSmoothing() + "%");
+        summary.setText("FPS: " + settings.getFps() + "  •  " + mode + "  •  Плавность: " + settings.getSmoothing() + "%  •  XR: " + (settings.isXrCamera() ? "вкл" : "выкл"));
     }
 
     private void addView(LinearLayout parent, View child) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
         lp.topMargin = dp(16);
         parent.addView(child, lp);
     }
 
-    private int dp(int v) {
-        return (int) (v * getResources().getDisplayMetrics().density);
-    }
+    private int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density); }
 }
