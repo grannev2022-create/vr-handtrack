@@ -26,17 +26,19 @@ public class MenuActivity extends AppCompatActivity {
         title.setPadding(0, 0, 0, 80);
         root.addView(title);
 
-        Button btnSkeleton = new Button(this);
-        btnSkeleton.setText("Скелет (Обычный)");
-        btnSkeleton.setTextSize(20);
-        btnSkeleton.setOnClickListener(v -> startActivity(new Intent(this, HandSkeletonActivity.class)));
-        root.addView(btnSkeleton);
+        Button btnStart = new Button(this);
+        btnStart.setText("ЗАПУСТИТЬ VR");
+        btnStart.setTextSize(22);
+        btnStart.setPadding(40, 20, 40, 20);
+        btnStart.setOnClickListener(v -> startActivity(new Intent(this, VRActivity.class)));
+        root.addView(btnStart);
 
-        Button btnVR = new Button(this);
-        btnVR.setText("VR-режим (Стерео)");
-        btnVR.setTextSize(20);
-        btnVR.setOnClickListener(v -> startActivity(new Intent(this, VRActivity.class)));
-        root.addView(btnVR);
+        Button btnSettings = new Button(this);
+        btnSettings.setText("НАСТРОЙКИ");
+        btnSettings.setTextSize(18);
+        btnSettings.setPadding(40, 20, 40, 20);
+        btnSettings.setOnClickListener(v -> startActivity(new Intent(this, SettingsActivity.class)));
+        root.addView(btnSettings);
 
         setContentView(root);
     }
