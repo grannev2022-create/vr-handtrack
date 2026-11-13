@@ -13,7 +13,6 @@ public class MenuActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setGravity(Gravity.CENTER);
@@ -27,12 +26,17 @@ public class MenuActivity extends AppCompatActivity {
         title.setPadding(0, 0, 0, 80);
         root.addView(title);
 
-        Button btnStart = new Button(this);
-        btnStart.setText("ЗАПУСТИТЬ");
-        btnStart.setTextSize(24);
-        btnStart.setPadding(50, 20, 50, 20);
-        btnStart.setOnClickListener(v -> startActivity(new Intent(this, HandSkeletonActivity.class)));
-        root.addView(btnStart);
+        Button btnSkeleton = new Button(this);
+        btnSkeleton.setText("Скелет (Обычный)");
+        btnSkeleton.setTextSize(20);
+        btnSkeleton.setOnClickListener(v -> startActivity(new Intent(this, HandSkeletonActivity.class)));
+        root.addView(btnSkeleton);
+
+        Button btnVR = new Button(this);
+        btnVR.setText("VR-режим (Стерео)");
+        btnVR.setTextSize(20);
+        btnVR.setOnClickListener(v -> startActivity(new Intent(this, VRActivity.class)));
+        root.addView(btnVR);
 
         setContentView(root);
     }
