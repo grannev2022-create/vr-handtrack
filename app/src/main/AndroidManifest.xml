@@ -6,11 +6,13 @@
     <application
         android:label="VR Handtrack"
         android:theme="@style/Theme.AppCompat.NoActionBar">
-        <activity android:name=".MainActivity" android:exported="true">
+        <activity android:name=".MenuActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".HandSkeletonActivity" android:exported="false" />
+        <activity android:name=".VRActivity" android:exported="false" />
     </application>
 </manifest>

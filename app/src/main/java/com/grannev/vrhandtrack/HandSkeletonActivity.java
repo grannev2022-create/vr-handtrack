@@ -34,7 +34,7 @@ import com.google.mediapipe.tasks.components.containers.Landmark;
 
 import java.util.List;
 
-public class MainActivity extends AppCompatActivity {
+public class HandSkeletonActivity extends AppCompatActivity {
     private static final int REQ_CAMERA = 1;
     private static final String MODEL = "hand_landmarker.task";
     private PreviewView previewView;
