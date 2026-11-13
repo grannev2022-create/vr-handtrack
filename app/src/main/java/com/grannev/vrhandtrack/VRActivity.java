@@ -1,299 +1,231 @@
 package com.grannev.vrhandtrack;
 
 import android.Manifest;
-import android.content.Context;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
-import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Matrix;
-import android.graphics.Paint;
-import android.hardware.Sensor;
-import android.hardware.SensorEvent;
-import android.hardware.SensorEventListener;
-import android.hardware.SensorManager;
-import android.hardware.camera2.CameraAccessException;
-import android.hardware.camera2.CameraManager;
+import android.opengl.GLSurfaceView;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
-import android.view.Surface;
-import android.view.SurfaceHolder;
-import android.view.SurfaceView;
+import android.util.Size;
+import android.view.WindowManager;
 import android.widget.FrameLayout;
+import android.widget.Toast;
 
-import androidx.annotation.NonNull;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.camera.core.Camera;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ImageAnalysis;
-import androidx.camera.core.ImageProxy;
-import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
-import androidx.camera.view.PreviewView;
-import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
+import com.google.ar.core.ArCoreApk;
 import com.google.common.util.concurrent.ListenableFuture;
-import com.google.mediapipe.framework.image.BitmapImageBuilder;
-import com.google.mediapipe.tasks.components.containers.NormalizedLandmark;
-import com.google.mediapipe.tasks.core.BaseOptions;
-import com.google.mediapipe.tasks.vision.core.RunningMode;
-import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker;
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult;
 
-import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class VRActivity extends AppCompatActivity implements SensorEventListener {
+public class VRActivity extends AppCompatActivity {
+    private static final String TAG = "VRActivity";
+    private static final long TOGGLE_COOLDOWN_MS = 600;
 
-    private static final int CAMERA_PERMISSION_CODE = 100;
-    private PreviewView previewView;
-    private OverlayView overlayView;
-    private HandLandmarker handLandmarker;
+    private GLSurfaceView glView;
+    private VrRenderer renderer;
+    private HandOverlayView overlayView;
+    private SettingsStore settings;
+    private FlashlightController flashlight;
+    private HandTracker handTracker;
+
+    private PoseProvider pose;
+    private ProcessCameraProvider cameraProvider;
     private ExecutorService cameraExecutor;
 
-    private SensorManager sensorManager;
-    private Sensor rotationSensor;
+    private long lastToggleMs;
+    private boolean arInstallRequested;
+    private boolean permissionAsked;
 
-    private CameraManager cameraManager;
-    private String cameraId;
-    private boolean isFlashOn = false;
-
-    // Сглаживание
-    private final float[][] smoothed = new float[21][3];
-    private boolean hasSmooth = false;
-    private static final float EMA_ALPHA = 0.5f;
-
-    // Щипок
-    private boolean pinchActive = false;
-    private static final float PINCH_IN = 0.25f;
-    private static final float PINCH_OUT = 0.35f;
+    private final ActivityResultLauncher<String> permissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+                if (granted) {
+                    startTracking();
+                } else {
+                    Toast.makeText(this, "Нужен доступ к камере для трекинга рук", Toast.LENGTH_LONG).show();
+                    finish();
+                }
+            });
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        settings = new SettingsStore(this);
 
-        FrameLayout rootLayout = new FrameLayout(this);
-        previewView = new PreviewView(this);
-        overlayView = new OverlayView(this);
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-        rootLayout.addView(previewView, new FrameLayout.LayoutParams(-1, -1));
-        rootLayout.addView(overlayView, new FrameLayout.LayoutParams(-1, -1));
-        setContentView(rootLayout);
+        FrameLayout root = new FrameLayout(this);
 
+        glView = new GLSurfaceView(this);
+        glView.setEGLContextClientVersion(2);
+        renderer = new VrRenderer();
+        glView.setRenderer(renderer);
+        glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
+        root.addView(glView, new FrameLayout.LayoutParams(-1, -1));
+
+        overlayView = new HandOverlayView(this);
+        root.addView(overlayView, new FrameLayout.LayoutParams(-1, -1));
+
+        setContentView(root);
+
+        WindowInsetsControllerCompat insets = WindowCompat.getInsetsController(getWindow(), glView);
+        insets.hide(WindowInsetsCompat.Type.systemBars());
+        insets.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+
+        flashlight = new FlashlightController(this);
         cameraExecutor = Executors.newSingleThreadExecutor();
 
-        sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
-        if (sensorManager != null) rotationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
-
-        cameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
         try {
-            if (cameraManager != null) cameraId = cameraManager.getCameraIdList()[0];
-        } catch (CameraAccessException e) { Log.e("VR", "CamMgr error", e); }
+            handTracker = new HandTracker(this, new HandTracker.Listener() {
+                @Override
+                public void onPinchStart() {
+                    toggleFlashlight();
+                }
 
-        setupHandLandmarker();
+                @Override
+                public void onPinchEnd() {
+                }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            startCamera();
-        } else {
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_CODE);
+                @Override
+                public void onHandResult(HandLandmarkerResult result, int width, int height) {
+                    overlayView.onHands(result, width, height);
+                }
+            });
+        } catch (Exception e) {
+            Log.e(TAG, "HandTracker не создан", e);
+            Toast.makeText(this, "Нет модели hand_landmarker.task в assets — жесты отключены", Toast.LENGTH_LONG).show();
         }
     }
 
-    private void setupHandLandmarker() {
-        try {
-            BaseOptions baseOptions = BaseOptions.builder().setModelAssetPath("hand_landmarker.task").build();
-            handLandmarker = HandLandmarker.createFromOptions(this,
-                HandLandmarker.HandLandmarkerOptions.builder()
-                    .setBaseOptions(baseOptions).setNumHands(1)
-                    .setMinHandDetectionConfidence(0.5f).setMinTrackingConfidence(0.5f)
-                    .setRunningMode(RunningMode.LIVE_STREAM)
-                    .setResultListener((result, inputImage) -> runOnUiThread(() -> processResults(result)))
-                    .build());
-        } catch (Exception e) { Log.e("VR", "Init error", e); }
-    }
-
-    private void processResults(HandLandmarkerResult result) {
-        if (result.landmarks().isEmpty()) {
-            hasSmooth = false; pinchActive = false; overlayView.setResults(null, false);
-            return;
-        }
-        List<NormalizedLandmark> lm = result.landmarks().get(0);
-
-        if (!hasSmooth) {
-            for (int i = 0; i < 21; i++) { smoothed[i][0] = lm.get(i).x(); smoothed[i][1] = lm.get(i).y(); }
-            hasSmooth = true;
-        } else {
-            for (int i = 0; i < 21; i++) {
-                smoothed[i][0] = EMA_ALPHA * lm.get(i).x() + (1 - EMA_ALPHA) * smoothed[i][0];
-                smoothed[i][1] = EMA_ALPHA * lm.get(i).y() + (1 - EMA_ALPHA) * smoothed[i][1];
-            }
-        }
-
-        float dx = smoothed[4][0] - smoothed[8][0], dy = smoothed[4][1] - smoothed[8][1];
-        float dist = (float) Math.sqrt(dx * dx + dy * dy);
-        float px = smoothed[0][0] - smoothed[9][0], py = smoothed[0][1] - smoothed[9][1];
-        float palm = (float) Math.sqrt(px * px + py * py);
-        float norm = palm > 0.001f ? dist / palm : dist;
-
-        if (!pinchActive && norm < PINCH_IN) { pinchActive = true; toggleFlashlight(true); }
-        else if (pinchActive && norm > PINCH_OUT) { pinchActive = false; toggleFlashlight(false); }
-
-        overlayView.setResults(smoothed, pinchActive);
-    }
-
-    private void toggleFlashlight(boolean state) {
-        if (cameraManager == null || cameraId == null) return;
-        try {
-            cameraManager.setTorchMode(cameraId, state);
-            isFlashOn = state;
-        } catch (CameraAccessException e) { Log.e("VR", "Flash error", e); }
-    }
-
-    private void startCamera() {
-        ListenableFuture<ProcessCameraProvider> future = ProcessCameraProvider.getInstance(this);
-        future.addListener(() -> {
-            try {
-                Preview preview = new Preview.Builder().build();
-                preview.setSurfaceProvider(previewView.getSurfaceProvider());
-
-                ImageAnalysis analysis = new ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                        .build();
-
-                analysis.setAnalyzer(cameraExecutor, this::processImageProxy);
-
-                future.get().bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis);
-            } catch (Exception e) { Log.e("VR", "Cam bind error", e); }
-        }, ContextCompat.getMainExecutor(this));
-    }
-
-    private void processImageProxy(ImageProxy image) {
-        if (handLandmarker == null) { image.close(); return; }
-        try {
-            Bitmap raw = image.toBitmap();
-            Matrix matrix = new Matrix();
-            matrix.postRotate(image.getImageInfo().getRotationDegrees());
-            Bitmap rotated = Bitmap.createBitmap(raw, 0, 0, raw.getWidth(), raw.getHeight(), matrix, true);
-            handLandmarker.detectAsync(new BitmapImageBuilder(rotated).build(), SystemClock.uptimeMillis());
-        } catch (Exception e) { Log.e("VR", "Frame error", e); }
-        finally { image.close(); }
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == CAMERA_PERMISSION_CODE && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            startCamera();
-        }
+    private void toggleFlashlight() {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastToggleMs < TOGGLE_COOLDOWN_MS) return;
+        lastToggleMs = now;
+        boolean on = flashlight.toggle();
+        runOnUiThread(() -> Toast.makeText(this, on ? "Фонарик включён" : "Фонарик выключен", Toast.LENGTH_SHORT).show());
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if (sensorManager != null && rotationSensor != null) {
-            sensorManager.registerListener(this, rotationSensor, SensorManager.SENSOR_DELAY_GAME);
+        glView.onResume();
+        renderer.setTargetFps(settings.getFps());
+        renderer.setSmoothingPercent(settings.getSmoothing());
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            startTracking();
+        } else if (!permissionAsked) {
+            permissionAsked = true;
+            permissionLauncher.launch(Manifest.permission.CAMERA);
         }
     }
 
     @Override
     protected void onPause() {
+        stopTracking();
+        glView.onPause();
         super.onPause();
-        if (sensorManager != null) sensorManager.unregisterListener(this);
-        toggleFlashlight(false);
     }
-
-    @Override
-    public void onSensorChanged(SensorEvent event) {
-        if (event.sensor.getType() == Sensor.TYPE_ROTATION_VECTOR) {
-            float[] rawMatrix = new float[16];
-            SensorManager.getRotationMatrixFromVector(rawMatrix, event.values);
-            if (overlayView != null) overlayView.setHeadMatrix(rawMatrix);
-        }
-    }
-
-    @Override
-    public void onAccuracyChanged(Sensor sensor, int accuracy) {}
 
     @Override
     protected void onDestroy() {
+        if (handTracker != null) handTracker.close();
+        cameraExecutor.shutdown();
         super.onDestroy();
-        if (cameraExecutor != null) cameraExecutor.shutdown();
-        if (handLandmarker != null) handLandmarker.close();
     }
 
-    private static class OverlayView extends SurfaceView implements SurfaceHolder.Callback {
-        private float[][] points;
-        private boolean pinch;
-        private float[] headMatrix = new float[16];
-        private final Paint pointPaint, linePaint, dividerPaint;
+    private void startTracking() {
+        if (pose != null) return;
+        PoseProvider provider = null;
 
-        private static final int[][] HAND_CONNECTIONS = {
-                {0, 1}, {1, 2}, {2, 3}, {3, 4},
-                {0, 5}, {5, 6}, {6, 7}, {7, 8},
-                {5, 9}, {9, 10}, {10, 11}, {11, 12},
-                {9, 13}, {13, 14}, {14, 15}, {15, 16},
-                {13, 17}, {0, 17}, {17, 18}, {18, 19}, {19, 20}
-        };
-
-        public OverlayView(Context context) {
-            super(context);
-            getHolder().addCallback(this);
-            setZOrderMediaOverlay(true);
-
-            pointPaint = new Paint(); pointPaint.setColor(Color.RED); pointPaint.setStyle(Paint.Style.FILL);
-            linePaint = new Paint(); linePaint.setColor(Color.GREEN); linePaint.setStrokeWidth(6f); linePaint.setStyle(Paint.Style.STROKE);
-            dividerPaint = new Paint(); dividerPaint.setColor(Color.BLACK); dividerPaint.setStrokeWidth(12f);
-        }
-
-        public void setResults(float[][] pts, boolean p) {
-            this.points = pts; this.pinch = p; invalidate();
-        }
-
-        public void setHeadMatrix(float[] m) {
-            this.headMatrix = m; invalidate();
-        }
-
-        @Override
-        public void surfaceCreated(@NonNull SurfaceHolder holder) {}
-        @Override
-        public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {}
-        @Override
-        public void surfaceDestroyed(@NonNull SurfaceHolder holder) {}
-
-        @Override
-        protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            canvas.drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR);
-
-            int width = getWidth();
-            int height = getHeight();
-
-            // Разделитель для VR (полоса посередине)
-            canvas.drawLine(width / 2f, 0, width / 2f, height, dividerPaint);
-
-            // Если точки есть — рисуем скелет (ровно по центру)
-            if (points != null) {
-                // Отрисовка линий
-                for (int[] conn : HAND_CONNECTIONS) {
-                    float x1 = points[conn[0]][0] * width;
-                    float y1 = points[conn[0]][1] * height;
-                    float x2 = points[conn[1]][0] * width;
-                    float y2 = points[conn[1]][1] * height;
-                    canvas.drawLine(x1, y1, x2, y2, linePaint);
+        if (settings.getMode() == SettingsStore.MODE_6DOF) {
+            try {
+                ArCoreApk.InstallStatus status = ArCoreApk.getInstance().requestInstall(this, !arInstallRequested);
+                if (status == ArCoreApk.InstallStatus.INSTALL_REQUESTED) {
+                    arInstallRequested = true;
+                    return;
                 }
-                // Отрисовка точек
-                for (int i = 0; i < 21; i++) {
-                    float radius = (i == 4 || i == 8) ? 15f : 8f;
-                    if (pinch && (i == 4 || i == 8)) {
-                        canvas.drawCircle(points[i][0] * width, points[i][1] * height, radius * 2, pointPaint);
-                    } else {
-                        canvas.drawCircle(points[i][0] * width, points[i][1] * height, radius, pointPaint);
-                    }
-                }
+                ArCorePose ar = new ArCorePose(this, handTracker);
+                ar.start();
+                provider = ar;
+            } catch (Exception e) {
+                Log.e(TAG, "ARCore недоступен", e);
+                Toast.makeText(this, "6DoF недоступен на этом телефоне — включён 3DoF", Toast.LENGTH_LONG).show();
             }
         }
+
+        if (provider == null) {
+            try {
+                ThreeDofPose three = new ThreeDofPose(this);
+                three.start();
+                provider = three;
+                startCameraX();
+            } catch (Exception e) {
+                Toast.makeText(this, String.valueOf(e.getMessage()), Toast.LENGTH_LONG).show();
+                finish();
+                return;
+            }
+        }
+
+        pose = provider;
+        renderer.setPoseProvider(provider);
+    }
+
+    private void stopTracking() {
+        flashlight.setTorch(false);
+        flashlight.detachCameraControl();
+        if (pose != null) {
+            renderer.setPoseProvider(null);
+            pose.stop();
+            pose = null;
+        }
+        if (cameraProvider != null) {
+            cameraProvider.unbindAll();
+            cameraProvider = null;
+        }
+    }
+
+    private void startCameraX() {
+        if (handTracker == null) return;
+        ListenableFuture<ProcessCameraProvider> future = ProcessCameraProvider.getInstance(this);
+        future.addListener(() -> {
+            try {
+                if (pose == null) return;
+                cameraProvider = future.get();
+
+                ImageAnalysis analysis = new ImageAnalysis.Builder()
+                        .setTargetResolution(new Size(640, 480))
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                        .build();
+                analysis.setAnalyzer(cameraExecutor, image -> {
+                    try {
+                        if (!handTracker.isBusy()) handTracker.submit(image.toBitmap());
+                    } finally {
+                        image.close();
+                    }
+                });
+
+                cameraProvider.unbindAll();
+                Camera camera = cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysis);
+                flashlight.attachCameraControl(camera.getCameraControl());
+            } catch (Exception e) {
+                Log.e(TAG, "Не удалось запустить камеру", e);
+            }
+        }, ContextCompat.getMainExecutor(this));
     }
 }
